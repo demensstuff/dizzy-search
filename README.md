@@ -13,4 +13,4 @@ This is a showcase of a simple and clean search and crawl engine which was devel
 - Further scaling (i.e. by adding ElasticSearch or another storage) is straightforward
 
 ### Credits
-[PHPOffice](https://dillinger.io/) and [PDFParser](https://github.com/smalot/pdfparser) are used to collect *.docx, *.xlsx and *.pdf files content respectively.
+[PHPOffice](https://github.com/PHPOffice) and [PDFParser](https://github.com/smalot/pdfparser) are used to collect *.docx, *.xlsx and *.pdf files content respectively.
