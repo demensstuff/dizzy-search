@@ -1,55 +1,141 @@
 <?php
-    namespace App\Entities\Search;
-
+	namespace App\Entities\Search;
+	
+	use App\Helpers\IgnoredWordsHelper;
     use App\Helpers\TokenHelper;
 
-    class SearchQuery {
-        /** Regex used to check if the string is quoted */
-        const QUOTED_REGEX = "/^ *\".*\" *$/u";
+    /** This class represents a search query */
+	class SearchQuery {
+		/** @var string Regex used to check if the string is quoted */
+		protected const QUOTED_REGEX = "/^ *\".*\" *$/u";
 
-        public string $str;
+        /** @var string Raw query string */
+		protected string $str;
+		
+		/** @var string[] Non-ignored search query words */
+        protected array $words = [];
 
-        public int $numWordsStr = 0;
+        /** @var int Number of non-ignored search query words */
+        protected int $numWords = 0;
 
-        /** @var string[] $words */
-        public $words = [];
+		/** @var string[] All search query words */
+        protected array $wordsExact = [];
 
-        public int $numWords = 0;
-
-        public bool $isUnspecified = false;
-
-        public bool $noExact = false;
-
-        public bool $onlyExact = false;
-
-        /*
-         * @param string $str
-         * @param string[] $ignoredWords
+        /**
+         * @var int Number of all search query words
          */
-        public function __construct(string $str, $ignoredWords) {
-            $this->str = TokenHelper::normalize($str);
-            if (empty($this->str)) {
-                return;
-            }
+        protected int $numWordsExact = 0;
 
-            $this->words    = TokenHelper::words(mb_strtoupper($str), $ignoredWords);
-            $this->numWords = count($this->words);
+        /** @var bool Whether the search query is not exact and consists of ignored
+         * words only
+         */
+        protected bool $isUnspecified = false;
 
-            $quoted = preg_match(self::QUOTED_REGEX, $str);
+        /** @var bool True if only exact matches should be looked for */
+        protected bool $noExact = false;
 
-            if ($this->numWords == 0 && !$quoted) {
+        /** @var bool True if only exact matches should be looked for */
+        protected bool $onlyExact = false;
+
+		public function __construct(string $str, $ignoredWords) {
+			$this->str = TokenHelper::normalize($str);
+			if (empty($this->str)) {
+				return;
+			}
+
+            $upStr = mb_strtoupper($str);
+			$baseRes = TokenHelper::wordsWithOffsets($upStr);
+
+            if (!$baseRes) {
                 $this->isUnspecified = true;
 
                 return;
             }
 
-            $this->numWordsStr = mb_substr_count($this->str, ' ') + 1;
+            foreach ($baseRes as $entry) {
+                $lcWord = mb_strtolower($entry[0]);
+                $ucWord = mb_strtoupper($entry[0]);
 
-            if ($this->numWordsStr == 1) {
-                $this->noExact = true;
-            } else if ($quoted) {
-                $this->onlyExact = true;
+                $this->wordsExact[] = $lcWord;
+                $this->numWordsExact++;
+
+                $isIgnored = array_key_exists($lcWord, $ignoredWords);
+                $isAcronym = array_key_exists($ucWord, IgnoredWordsHelper::ACRONYMS);
+
+                if ($isIgnored && !$isAcronym) {
+                    continue;
+                }
+
+                $this->words[] = $isIgnored ? $ucWord : $lcWord;
+                $this->numWords++;
             }
+
+			$quoted = preg_match(self::QUOTED_REGEX, $str);
+			
+			if ($this->numWords == 0 && !$quoted) {
+				$this->isUnspecified = true;
+				
+				return;
+			}
+
+            $this->noExact = $this->numWordsExact == 1;
+            $this->onlyExact = !$this->noExact && $quoted;
+		}
+
+        /**
+         * @return string Cleaned query string
+         */
+        public function str(): string {
+            return $this->str;
         }
-    }
-?>
+
+        /**
+         * @return bool Whether the search query is not exact and consists of ignored
+         * words only
+         */
+        public function isUnspecified(): bool {
+            return $this->isUnspecified;
+        }
+
+        /**
+         * @return int Number of non-ignored search query words
+         */
+        public function numWords(): int {
+            return $this->numWords;
+        }
+
+        /**
+         * @return int Number of all words in the query
+         */
+        public function numWordsExact(): int {
+            return $this->numWordsExact;
+        }
+
+        /**
+         * @return bool Whether only exact matches should be looked for
+         */
+        public function onlyExact(): bool {
+            return $this->onlyExact;
+        }
+
+        /**
+         * @return bool True if only exact matches should be looked for
+         */
+        public function noExact(): bool {
+            return $this->noExact;
+        }
+
+        /**
+         * @return string[] All search query words
+         */
+        public function wordsExact(): array {
+            return $this->wordsExact;
+        }
+
+        /**
+         * @return string[] Non-ignored search query words
+         */
+        public function words(): array {
+            return $this->words;
+        }
+	}

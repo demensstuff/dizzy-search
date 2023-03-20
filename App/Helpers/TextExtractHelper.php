@@ -1,101 +1,116 @@
 <?php
-    namespace App\Helpers;
+	namespace App\Helpers;
+	
+	use Exception;
+    use PhpOffice\PhpSpreadsheet\IOFactory as XlsxIOFactory;
+    use PhpOffice\PhpSpreadsheet\Spreadsheet;
+    use PhpOffice\PhpWord\Element\Text;
+    use PhpOffice\PhpWord\Element\TextRun;
+    use PhpOffice\PhpWord\IOFactory as DocxIOFactory;
+    use PhpOffice\PhpWord\PhpWord;
+    use Smalot\PdfParser\Parser as PDFParser;
 
     require_once($_SERVER['DOCUMENT_ROOT'] . '/../vendor/autoload.php');
 
-    class TextExtractHelper {
-        protected \Smalot\PdfParser\Parser $pdfParser;
+    /** This class provides methods to extract text content from the files of required
+     * types
+     */
+	class TextExtractHelper {
+        /** @var PDFParser PDF parser object */
+		protected PDFParser $pdfParser;
+		
+		public function __construct() {
+			$this->pdfParser = new PDFParser();
+		}
 
-        public function __construct() {
-            $this->pdfParser = new \Smalot\PdfParser\Parser();
-        }
-
-        public function getText(string $path, string $extension): ?string {
-            $text = '';
-
+        /**
+         * @param string $path path to file
+         * @param string $extension file extension
+         * @return ?string file content or null
+         */
+		public function getText(string $path, string $extension): ?string {
             switch ($extension) {
-                case 'pdf':
+				case 'pdf':
+					try {
+						$text = $this->pdfParser->parseFile($path)->getText();
+					} catch (Exception) {
+						return null;
+					}
+					break;
+				case 'docx':
+					try {
+						$docx = DocxIOFactory::load($path);
+						$text = self::getTextDocx($docx);
+					} catch (Exception) {
+						return null;
+					}
+					break;
+				case 'xlsx':
                     try {
-                        $text = $this->pdfParser->parseFile($path)->getText();
-                    } catch (\Exception $e) {
-                        return null;
-                    }
+                        $xlsx = XlsxIOFactory::load($path);
+                        $text = self::getTextXlsx($xlsx);
+                     } catch (Exception) {
+						return null;
+					}
+
                     break;
-                case 'docx':
-                    try {
-                        /** @var \PhpOffice\PhpWord\PhpWord $docx; */
-                        $docx = \PhpOffice\PhpWord\IOFactory::load($path);
-                        $text = self::getTextDocx($docx);
-                    } catch (\PhpOffice\PhpWord\Exception\InvalidImageException $e) {
-                        return null;
-                    }
-                    break;
-                case 'xlsx':
-                    /** @var \PhpOffice\PhpSpreadsheet\Spreadsheet */
-                    $xlsx = \PhpOffice\PhpSpreadsheet\IOFactory::load($path);
-                    $text = self::getTextXlsx($xlsx);
                 default:
-                    return null;
-            }
+					return null;
+			}
 
-            return TokenHelper::stripWhitespaces($text);
-        }
+			return TokenHelper::cleanUp($text);
+		}
 
-        protected static function getTextDocx(\PhpOffice\PhpWord\PhpWord $docx): string {
-            /** @var \PhpOffice\PhpWord\Element\Section[] $sections */
+        /**
+         * @param PhpWord $docx docx file handle
+         * @return string file contents
+         */
+		protected static function getTextDocx(PhpWord $docx): string {
             $sections = $docx->getSections();
-            $content = '';
+			$content = '';
 
-            /** @var \PhpOffice\PhpWord\Element\Section $section */
             foreach ($sections as $section) {
-                /** @var \PhpOffice\PhpWord\Element\AbstractElement[] $sectEls */
                 $sectEls = $section->getElements();
 
-                /** @var \PhpOffice\PhpWord\Element\AbstractElement $sectEl */
                 foreach ($sectEls as $sectEl) {
-                    if ($sectEl instanceof \PhpOffice\PhpWord\Element\TextRun) {
-                        /** @var \PhpOffice\PhpWord\Element\AbstractElement[] $inSectEls */
-                        $inSectEls = $sectEl->getElements();
+					if ($sectEl instanceof TextRun) {
+						$inSectEls = $sectEl->getElements();
 
-                        /** @var \PhpOffice\PhpWord\Element\AbstractElement $inSectEl */
-                        foreach ($inSectEls as $inSectEl) {
-                            if ($inSectEl instanceof \PhpOffice\PhpWord\Element\Text) {
-                                $content .= $inSectEl->getText() . ' ';
-                            }
-                        }
-                    }
-                }
-            }
+						foreach ($inSectEls as $inSectEl) {
+							if ($inSectEl instanceof Text) {
+								$content .= $inSectEl->getText() . ' ';
+							}
+						}
+					}
+				}
+			}
+			
+			return $content;
+		}
 
-            return $content;
-        }
-
-        protected static function getTextXlsx(
-            \PhpOffice\PhpSpreadsheet\Spreadsheet $xlsx
-        ): string {
-            $content = '';
-
-            $sheetCount = $xlsx->getSheetCount();
-            for ($i = 0; $i < $sheetCount; $i++) {
-                /** @var \PhpOffice\PhpSpreadsheet\Worksheet\Worksheet $sheet */
+        /**
+         * @param Spreadsheet $xlsx xlsx file handle
+         * @return string file contents
+         * @throws \PhpOffice\PhpSpreadsheet\Exception
+         */
+        protected static function getTextXlsx(Spreadsheet $xlsx): string {
+			$content = '';
+			
+			$sheetCount = $xlsx->getSheetCount();
+			for ($i = 0; $i < $sheetCount; $i++) {
                 $sheet = $xlsx->getSheet($i);
 
-                /** @var \PhpOffice\PhpSpreadsheet\Worksheet\RowIterator $rowIt */
                 $rowIt = $sheet->getRowIterator();
 
-                /** @var \PhpOffice\PhpSpreadsheet\Worksheet\Row $row*/
                 foreach ($rowIt as $row) {
-                    /** @var \PhpOffice\PhpSpreadsheet\Worksheet\RowCellIterator $cellIt */
                     $cellIt = $row->getCellIterator();
 
-                    /** @var \PhpOffice\PhpSpreadsheet\Cell\Cell $cell */
-                    foreach ($cellIt as $cell) {
-                        $content .= $cell->getValue() . ' ';
-                    }
-                }
-            }
-
-            return $content;
-        }
-    }
-?>
+					foreach ($cellIt as $cell) {
+						$content .= $cell->getValue() . ' ';
+					}
+				}
+			}
+			
+			return $content;
+		}
+	}

@@ -1,42 +1,56 @@
 <?php
-    namespace App\Responses;
+	namespace App\Responses;
 
-    class CacheResponse extends Response {
-        public int $added;
-        public int $removed;
-        public int $unchanged;
+    /** This class represents a Cache response */
+	class CacheResponse extends Response {
+        /** @var int Number of added cache entries */
+		public int $added;
 
-        /**
-         * @return array
-         */
-        public function toArray() {
-            $arr = parent::toArray();
+        /** @var int Number of removed cache entries */
+		public int $removed;
 
-            $arr['added']     = $this->added;
-            $arr['removed']   = $this->removed;
-            $arr['unchanged'] = $this->unchanged;
+        /** @var int Number of unchanged cache entries */
+		public int $unchanged;
 
-            return $arr;
-        }
+        /** @var float Caching time */
+		public float $time;
+		
+		/**
+         * Converts the object to the array
+		 * @return array string $key => int $value
+		 */
+		public function toArray(): array {
+			$arr = parent::toArray();
+			
+			$arr['added']     = $this->added;
+			$arr['removed']   = $this->removed;
+			$arr['unchanged'] = $this->unchanged;
+			$arr['time']      = $this->time;
 
-        /**
-         * @param int $added
-         * @param int $removed
-         * @param int $unchanged
-         * @return CacheResponse
-         */
-        public static function ok(
-            int $added     = 0,
-            int $removed   = 0,
-            int $unchanged = 0
-        ): static {
-            $r = parent::ok();
+			return $arr;
+		}
+		
+		/**
+         * Returns a successful response
+		 * @param int $added
+		 * @param int $removed
+		 * @param int $unchanged
+		 * @param float $time
+		 * @return CacheResponse
+		 */
+		public static function ok(
+			int $added     = 0,
+			int $removed   = 0,
+			int $unchanged = 0,
+			float $time    = 0
+		): static {
+			$r = parent::ok();
+			
+			$r->added     = $added;
+			$r->removed   = $removed;
+			$r->unchanged = $unchanged;
+			$r->time      = $time;
 
-            $r->added     = $added;
-            $r->removed   = $removed;
-            $r->unchanged = $unchanged;
-
-            return $r;
-        }
-    }
-?>
+			return $r;
+		}
+	}

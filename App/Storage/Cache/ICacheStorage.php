@@ -1,50 +1,22 @@
 <?php
-    namespace App\Storage\Cache;
-
-    use App\Entities\Cache\CacheDescr;
-    use App\Entities\Cache\WordOffsets;
+	namespace App\Storage\Cache;
+	
+	use App\Entities\Cache\EntityCacheIndex;
+	use App\Entities\Cache\EntityCache;
+    use App\Entities\Cache\EntityRawCache;
 
     interface ICacheStorage {
-        /**
-         * @return CacheDescr[]|null
-         */
-        public function list();
+		public function list(): EntityCacheIndex;
 
-        /**
-         * @return WordOffsets[]|null
-         */
-        public function offsets(string $key);
+		public function cache(string $key): EntityCache;
+		
+		public function raw(string $key): EntityRawCache;
 
-        public function exact(string $key): ?string;
+		public function putList(EntityCacheIndex $index): void;
 
-        /**
-         * @return string[]|null
-         */
-        public function tokenized(string $key);
-
-        public function raw(string $key): ?string;
-
-        /**
-         * @param CacheDescr[] $listDescr
-         */
-        public function putList($listDescr);
-
-        /**
-         * @param string $key
-         * @param WordOffsets[]|null $offsets
-         */
-        public function putOffsets(string $key, $offsets);
-
-        public function putExact(string $key, string $exact);
-
-        /**
-         * @param string $key
-         * @param string[] $tokenized
-         */
-        public function putTokenized(string $key, $tokenized);
-
-        public function putRaw(string $key, string $raw);
-
-        public function remove(string $key);
-    }
-?>
+		public function putCache(string $key, EntityCache $cache): void;
+		
+		public function putRaw(string $key, EntityRawCache $rawCache): void;
+		
+		public function remove(string $key): void;
+	}

@@ -1,154 +1,147 @@
 <?php
-    namespace App\Storage\Cache;
-
+	namespace App\Storage\Cache;
+	
+	use App\Entities\Cache\EntityRawCache;
+    use App\Helpers\ArrayHelper;
     use App\Helpers\FilesystemHelper;
-    use App\Entities\Cache\CacheDescr;
-    use App\Entities\Cache\WordOffsets;
-    use App\Entities\JSONer;
-    use App\Storage\Cache\ICacheStorage;
+	use App\Entities\Cache\EntityCacheIndex;
+	use App\Entities\Cache\EntityCache;
 
-    class FileCacheStorage implements ICacheStorage {
-        protected string $cacheDir;
-        protected string $indexFile;
+    /** File repository implementation of cache storage */
+	class FileCacheStorage implements ICacheStorage {
+        /** @var string Cache root directory */
+		protected string $cacheDir;
 
-        public function __construct() {
-            $this->cacheDir = $_SERVER['DOCUMENT_ROOT'] . '/../.cache/content/';
-            $this->indexFile = $this->cacheDir . 'index.json';
+        /** @var string Cache index file path */
+		protected string $indexFile;
+		
+		public function __construct() {
+			$this->cacheDir = $_SERVER['DOCUMENT_ROOT'] . '/../.cache/content/';
+			$this->indexFile = $this->cacheDir . 'index.bin';
+			
+			if (!is_dir($this->cacheDir)) {
+				mkdir($this->cacheDir, 0777, true);
+			}
+		}
+		
+		/**
+		 * @return EntityCacheIndex Full cache index
+		 */
+		public function list(): EntityCacheIndex {
+            return new EntityCacheIndex($this->get($this->indexFile));
+		}
 
-            if (!is_dir($this->cacheDir)) {
-                mkdir($this->cacheDir, 0777, true);
-            }
-        }
-
-        /**
-         * @return CacheDescr[]|null
-         */
-        public function list() {
-            $arr = json_decode(@file_get_contents($this->indexFile), true);
-            if (!$arr) {
-                return null;
-            }
-
-            return CacheDescr::map($arr);
-        }
-
-        /**
-         * @param string $key
-         * @return WordOffsets[]|null
-         */
-        public function offsets(string $key) {
-            $arr = json_decode(@file_get_contents($this->offsetsPath($key)), true);
-            if (!$arr) {
-                return null;
-            }
-
-            return WordOffsets::manyFromArray($arr);
-        }
-
-        public function exact(string $key): ?string {
-            $str = @file_get_contents($this->exactPath($key));
-            if (!$str) {
-                return null;
-            }
-
-            return $str;
-        }
+		/**
+         * @param string $key Cache key
+		 * @return EntityCache Cache object
+		 */
+		public function cache(string $key): EntityCache {
+            return new EntityCache($this->get($this->cachePath($key)));
+		}
 
         /**
-         * @param string $key
-         * @return string[]|null
+         * @param string $key Cache key
+         * @return EntityRawCache Cache object
          */
-        public function tokenized(string $key) {
-            $arr = json_decode(@file_get_contents($this->tokenizedPath($key)), true);
-            if (!$arr) {
-                return null;
-            }
+		public function raw(string $key): EntityRawCache {
+            return new EntityRawCache($this->get($this->rawPath($key)));
+		}
+		
+		/**
+         * Saves cache index into storage
+		 * @param EntityCacheIndex $index Full cache index
+		 */
+		public function putList(EntityCacheIndex $index): void {
+            $this->put($this->indexFile, $index->toArray());
+		}
 
-            return $arr;
-        }
+		/**
+         * Saves cache object into storage
+         * @param string $key Cache key
+         * @param EntityCache $cache Cache object
+         */
+		public function putCache(string $key, EntityCache $cache): void {
+			$this->put($this->cachePath($key, true), $cache->toArray());
+		}
 
-        public function raw(string $key): ?string {
-            $str = @file_get_contents($this->rawPath($key));
-            if (!$str) {
-                return null;
-            }
-
-            return $str;
-        }
+		/**
+         * Saves raw cache object into storage
+         * @param string $key Cache key
+         * @param EntityRawCache $rawCache Raw cache object
+         */
+		public function putRaw(string $key, EntityRawCache $rawCache): void {
+            $this->put($this->rawPath($key, true), $rawCache->toArray());
+		}
 
         /**
-         * @param CacheDescr[] $listDescr
+         * Removes cache object
+         * @param string $key Cache key
+         * @return void
          */
-        public function putList($listDescr) {
-            file_put_contents($this->indexFile, JSONer::manyToJSON($listDescr));
-        }
+		public function remove(string $key): void {
+			$dir = $this->getCacheDir($key);
+			
+			if (is_dir($dir)) {
+				FilesystemHelper::rmdir($dir);
+			}
+		}
 
         /**
-         * @param string $key
-         * @param WordOffsets[] $offsets
+         * @param string $key Cache key
+         * @param bool $shouldCreate Whether the folder should be created
+         * @return string Path to raw cache file
          */
-        public function putOffsets(string $key, $offsets) {
-            $this->makeCacheDir($key);
-
-            file_put_contents($this->offsetsPath($key), JSONer::manyToJSON($offsets));
-        }
-
-        public function putExact(string $key, string $exactCache) {
-            $this->makeCacheDir($key);
-
-            file_put_contents($this->exactPath($key), $exactCache);
-        }
+		protected function rawPath(string $key, bool $shouldCreate = false): string {
+			return $this->getCacheDir($key, $shouldCreate) . '/raw.bin';
+		}
 
         /**
-         * @param string $key
-         * @param string[] $tokenized
+         * @param string $key Cache key
+         * @param bool $shouldCreate Whether the folder should be created
+         * @return string Path to cache file
          */
-        public function putTokenized(string $key, $tokenized) {
-            $this->makeCacheDir($key);
+		protected function cachePath(string $key, bool $shouldCreate = false): string {
+			return $this->getCacheDir($key, $shouldCreate) . '/cache.bin';
+		}
 
-            file_put_contents($this->tokenizedPath($key), JSONer::anyToJSON($tokenized));
-        }
+        /**
+         * @param string $key Cache key
+         * @param bool $shouldCreate Whether the folder should be created
+         * @return string Cache folder
+         */
+		protected function getCacheDir(string $key, bool $shouldCreate = false): string {
+			$dir = $this->cacheDir . $key;
 
-        public function putRaw(string $key, string $raw) {
-            $this->makeCacheDir($key);
-
-            file_put_contents($this->rawPath($key), $raw);
-        }
-
-        public function remove(string $key) {
-            $dir = $this->getCacheDir($key);
-
-            if (is_dir($dir)) {
-                FilesystemHelper::rmdir($this->getCacheDir($key));
-            }
-        }
-
-        protected function offsetsPath(string $key): string {
-            return $this->getCacheDir($key) . '/offsets.json';
-        }
-
-        protected function exactPath(string $key): string {
-            return $this->getCacheDir($key) . '/exact.txt';
-        }
-
-        protected function tokenizedPath(string $key): string {
-            return $this->getCacheDir($key) . '/tokenized.json';
-        }
-
-        protected function rawPath(string $key): string {
-            return $this->getCacheDir($key) . '/raw.txt';
-        }
-
-        protected function makeCacheDir(string $key) {
-            $dir = $this->getCacheDir($key);
-
-            if (!is_dir($dir)) {
+            if ($shouldCreate && !is_dir($dir)) {
                 mkdir($dir, 0777, true);
             }
+
+            return $dir;
+		}
+
+        /**
+         * Retrieves and deserializes an object from the file
+         * @param string $path Object file path
+         * @return mixed EntityCache, EntityCacheIndex or EntityRawCache
+         */
+        protected function get(string $path): mixed {
+            $object = @igbinary_unserialize(@file_get_contents($path));
+
+            return $object ?: null;
         }
 
-        protected function getCacheDir(string $key) {
-            return $this->cacheDir . $key;
+        /**
+         * Stores an object to the file (EntityCache, EntityCacheIndex or EntityRawCache)
+         * @param string $path Path to cache file
+         * @param array $object Cache object to be stored
+         * @param bool $debug Whether to save cache as JSON
+         * @return void
+         */
+        protected function put(string $path, array $object, bool $debug = false): void {
+            file_put_contents($path, igbinary_serialize($object));
+
+            if ($debug) {
+                file_put_contents($path . '.json', ArrayHelper::toJSON($object));
+            }
         }
     }
-?>

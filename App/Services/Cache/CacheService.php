@@ -1,250 +1,271 @@
 <?php
-    namespace App\Services\Cache;
-
-    use App\Entities\Cache\CacheDescr;
-    use App\Entities\Cache\WordDescr;
-    use App\Entities\Cache\WordOffsets;
+	namespace App\Services\Cache;
+	
+	use App\Entities\Cache\EntityCache;
+    use App\Entities\Cache\EntityCacheIndex;
+    use App\Entities\Cache\EntityRawCache;
+    use App\Entities\URL;
+    use App\Helpers\ArrayHelper;
     use App\Helpers\FilesystemHelper;
+    use App\Helpers\IgnoredWordsHelper;
     use App\Helpers\LangHelper;
-    use App\Helpers\PageHelper;
-    use App\Helpers\TextExtractHelper;
-    use App\Helpers\TokenHelper;
-    use App\Storage\Cache\FileCacheStorage;
-    use App\Storage\Cache\ICacheStorage;
+	use App\Helpers\WebHelper;
+	use App\Helpers\TextExtractHelper;
+	use App\Helpers\TokenHelper;
+	use App\Storage\Cache\FileCacheStorage;
+	use App\Storage\Cache\ICacheStorage;
+    use CurlHandle;
 
-    class CacheService {
-        /** Page content storage selector */
-        const XPATH_CONTENT = "//header"; // 'main';
+    /** This class contains all the methods related to entity cache */
+	class CacheService {
+		/** @var string Page content storage selector */
+		protected const XPATH_CONTENT = "//header";
+		
+		/** @var array[string]null Allowed extensions */
+        protected const EXTENSIONS = [
+			'pdf'  => null,
+			'docx' => null,
+			'xlsx' => null
+		];
+		
+		/** @var string Language GET param key */
+        protected const LANG_KEY = 'l';
 
-        /** Allowed Extensions */
-        const EXTS = [ 'pdf', 'docx', 'xlsx' ];
+        /** @var ICacheStorage Cache repository */
+		protected ICacheStorage $cacheStorage;
 
-        /** Language get param key */
-        const LANG_KEY = 'l';
+        /** @var int Length of document root */
+		protected int $rootPathLength;
 
-        protected ICacheStorage $cacheStorage;
+        /** @var TextExtractHelper Helper class for extracting text from files */
+		protected TextExtractHelper $textExtractHelper;
+		
+		/** @var array[string]null
+         * For files: paths to the directories that should be processed
+         * For pages: known mod_markers of the pages (stored to avoid repetition)
+         */
+		protected array $included = [];
+		
+		/** @var array[string]null Paths to the entities excluded from processing  */
+		protected array $excluded = [];
+		
+		/** @var array[string]null Paths to the entities that have already been checked */
+		protected array $checked = [];
+		
+		/** @var array[string]null Array of words that should be ignored in exact cache */
+		protected array $ignoredWords = [];
 
-        protected int $prefixLength;
+        /** @var string Current site domain name */
+		protected string $domain;
 
-        protected TextExtractHelper $textExtractHelper;
+        /** @var string Current language */
+		protected string $lang;
 
-        /** @var string[] $included */
-        protected $included = [];
+        /** @var CurlHandle Curl handle for site crawling */
+		protected CurlHandle $ch;
+		
+		/** @var EntityCacheIndex Entity cache index, empty or loaded from repository */
+		protected EntityCacheIndex $cacheIndex;
 
-        /** @var string[] $excluded */
-        protected $excluded = [];
+        /** @var int Cache processing timestamp */
+		protected int $processedAt;
 
-        /** @var string[] $checked */
-        protected $checked = [];
+        /** @var int Number of entries added to the cache */
+		protected int $addedCtr = 0;
 
-        /** @var string[] $ignoredWords */
-        protected $ignoredWords = [];
+        /** @var int Number of entities removed from the cache */
+		protected int $removedCtr = 0;
 
-        protected string $domain;
+        /** @var int Number of entities left unchanged in the cache */
+		protected int $unchangedCtr = 0;
 
-        protected string $lang;
+        /** @var int Caching start time */
+        protected int $startTime = 0;
+		
+		public function __construct() {
+			$this->cacheStorage = new FileCacheStorage();
+			
+			$this->rootPathLength = mb_strlen($_SERVER['DOCUMENT_ROOT']);
+			$this->textExtractHelper = new TextExtractHelper();
+		}
+		
+		/**
+         * This function is called before other caching functions and pre-initializes
+         * the data needed
+		 * @param string[] $ignoredWords Array (word => null) of ignored words
+		 */
+		public function prepareCaching(array $ignoredWords): void {
+            $this->startTime = hrtime(true);
 
-        protected \CurlHandle $ch;
+			$this->ignoredWords = $ignoredWords;
+			$this->cacheIndex = $this->cacheStorage->list();
+			$this->processedAt = time();
 
-        /** @var array $listDescr 'string' => 'CacheDescr' */
-        protected $listDescr = [];
+			$this->addedCtr = 0;
+			$this->removedCtr = 0;
+			$this->unchangedCtr = 0;
+		}
+		
+		/**
+         * This functions performs file caching based on the included and excluded dirs
+		 * @param string[] $included Array of dirs that should be scanned
+		 * @param string[] $excluded Array of ignored dirs, has priority over included
+		 */
+		public function cacheFiles(array $included, array $excluded): void {
+			$this->included = ArrayHelper::toHashmap(function (string $value): string {
+				return $_SERVER['DOCUMENT_ROOT'] . $value;
+			}, $included);
+			
+			$this->excluded = ArrayHelper::toHashmap(function (string $value): string {
+				return $_SERVER['DOCUMENT_ROOT'] . $value;
+			}, $excluded);
+			
+			$this->checked = [];
+			
+			foreach ($this->included as $dir => $null) {
+				$this->cacheFilesInDir($dir);
+			}
+		}
+		
+		/**
+         * This function recursively scans and caches all pages of the current site
+         * starting from index and skipping the excluded ones
+		 * @param string[] $excluded Pages that should not be scanned
+		 */
+		public function cachePages(array $excluded): void {
+			libxml_use_internal_errors(true);
+			
+			$this->included = [];
+			
+			$this->domain = WebHelper::domain();
+			
+			$this->ch = curl_init();
+			curl_setopt($this->ch, CURLOPT_RETURNTRANSFER, true);
+			curl_setopt($this->ch, CURLOPT_FOLLOWLOCATION, true);
+			curl_setopt($this->ch, CURLOPT_HEADER, true);
+			
+			foreach (LangHelper::LANGUAGES as $lang) {
+				$this->checked = [];
+				$this->excluded = ArrayHelper::toHashmap(function (
+					string $value
+				) use ($lang): string {
+                    $url = new URL($value);
 
-        protected int $processedAt;
+                    $url->setGetParam(self::LANG_KEY, $lang);
 
-        protected int $addedCtr = 0;
+                    return $url->toString();
+				}, $excluded);
+				
+				$this->lang = $lang;
+				
+				$this->cachePageRec(new URL('/'));
+			}
+			
+			libxml_clear_errors();
+		}
+		
+		/**
+         * This function finishes the caching process and returns the statistics
+		 * @return array
+         *     0 => added elements (int),
+         *     1 => removed elements (int),
+         *     2 => unchanged elements (int)
+         *     3 => unchanged elements (int)
+		 */
+		public function finish(): array {
+            $arr = $this->cacheIndex->toArray();
 
-        protected int $removedCtr = 0;
+			foreach ($arr as $key => $value) {
+				if ($value[EntityCacheIndex::PROCESSED_AT] >= $this->processedAt) {
+					continue;
+				}
+				
+				$this->cacheStorage->remove($key);
+				$this->cacheIndex->remove($key);
+				$this->removedCtr++;
+			}
+			
+			$this->cacheStorage->putList($this->cacheIndex);
 
-        protected int $unchangedCtr = 0;
+            $endTime = hrtime(true);
 
-        public function __construct() {
-            $this->cacheStorage = new FileCacheStorage();
-
-            $this->prefixLength = mb_strlen($_SERVER['DOCUMENT_ROOT']);
-            $this->textExtractHelper = new TextExtractHelper();
-        }
+            return [
+                $this->addedCtr,
+                $this->removedCtr,
+                $this->unchangedCtr,
+                ($endTime - $this->startTime) / 1e9
+            ];
+		}
 
         /**
-         * @param string[] $ignoredWords
+         * This function caches the given page and all same site pages linked on it
+         * @param URL $url URL
+         * @return void
          */
-        public function prepareCaching($ignoredWords) {
-            $this->ignoredWords = $ignoredWords;
-            $this->listDescr = $this->cacheStorage->list() ?? [];
-            $this->processedAt = time();
-            $this->addedCtr = 0;
-            $this->removedCtr = 0;
-            $this->unchangedCtr = 0;
-        }
+		protected function cachePageRec(URL $url): void {
+            $url->setGetParam(self::LANG_KEY, $this->lang);
+            $urlStr = $url->toString(true);
 
-        /**
-         * @param string[] $included
-         * @param string[] $excluded
-         */
-        public function cacheFiles($included, $excluded) {
-            $this->included = array_map(function ($value) {
-                return $_SERVER['DOCUMENT_ROOT'] . $value;
-            }, $included);
-
-            $this->excluded = array_map(function ($value) {
-                return $_SERVER['DOCUMENT_ROOT'] . $value;
-            }, $excluded);
-
-            $this->checked = [];
-
-            foreach ($this->included as $dir) {
-                $this->cacheFilesInDir($dir);
+            if (!$this->shouldScan($urlStr)) {
+                return;
             }
-        }
 
-        /**
-         * @param string[] $excluded
-         */
-        public function cachePages($excluded) {
-            libxml_use_internal_errors(true);
+            $baseUrl = $urlStr;
+            $xpath = WebHelper::getXPath($this->ch, $this->domain, $urlStr);
 
-            $this->included = [];
-
-            $this->domain = PageHelper::domain();
-
-            $this->ch = curl_init();
-            curl_setopt($this->ch, CURLOPT_RETURNTRANSFER, true);
-            curl_setopt($this->ch, CURLOPT_FOLLOWLOCATION, true);
-            curl_setopt($this->ch, CURLOPT_HEADER, true);
-
-            foreach ([ LangHelper::EN, LangHelper::RU ] as $lang) {
-                $this->checked = [];
-                $this->excluded = array_map(function ($value) use ($lang) {
-                    return PageHelper::setGetParam($value, self::LANG_KEY, $lang);
-                }, $excluded);
-
-                $this->lang = $lang;
-
-                $this->cachePageRec('');
+            if (!$xpath || ($baseUrl != $urlStr && !$this->shouldScan($urlStr))) {
+                return;
             }
 
-            $this->checked = [];
-
-            $this->cachePageRec('');
-
-            libxml_clear_errors();
-        }
-
-        /**
-         * @return array
-         */
-        public function finishCaching() {
-            foreach ($this->listDescr as $key => $descr) {
-                if ($descr->processedAt >= $this->processedAt) {
+            $links = $xpath->evaluate('//a/@href');
+            foreach ($links as $link) {
+                $url = new URL($link->value);
+                if (!$url->belongsToDomain()) {
                     continue;
                 }
 
-                $this->cacheStorage->remove($key);
-                unset($this->listDescr[$key]);
-                $this->removedCtr++;
+                $this->cachePageRec($url);
             }
+			
+			$query = self::XPATH_CONTENT . WebHelper::XPATH_TEXT_ELEMENTS;
+			$rawText = WebHelper::rawTextXPath($xpath, $query);
 
-            $this->cacheStorage->putList($this->listDescr);
-
-            return [ $this->addedCtr, $this->removedCtr, $this->unchangedCtr ];
-        }
-
-        protected function cachePageRec(string $url) {
-            $url = PageHelper::setGetParam($url, self::LANG_KEY, $this->lang);
-
-            $xpath = $this->getXPathAndRedirectedURL($url);
-            if (!$xpath) {
-                return;
-            }
-
-            $this->processPageLinks($xpath);
-
-            $query = self::XPATH_CONTENT . PageHelper::XPATH_TEXT_ELEMENTS;
-            $rawText = PageHelper::rawTextXPath($xpath, $query);
-
-            $modMarker = md5($rawText);
-            if (in_array($modMarker, $this->included)) {
-                return;
-            }
-
-            $this->included[] = $modMarker;
-
-            $key = md5('page:' . $this->lang . ':' . $url);
-            $listed = array_key_exists($key, $this->listDescr);
-
-            error_log("processing page: " . $url);
-
-            if ($listed && $this->listDescr[$key]->modMarker == $modMarker) {
-                $this->listDescr[$key]->processedAt = $this->processedAt;
-                $this->unchangedCtr++;
-
-                return;
-            }
-
-            $name = PageHelper::rawTextXPath($xpath, "//title/text()");
+            $name = WebHelper::rawTextXPath($xpath, "//title/text()");
             if (!$name) {
-                $name = $url;
+                $name = $urlStr;
             }
+			
+			$modMarker = md5($rawText);
+            $key = md5('page:' . $this->lang . ':' . $urlStr);
 
-            $this->buildCaches($key, $rawText);
+			if (array_key_exists($modMarker, $this->included)) {
+				return;
+			}
+			
+			$this->included[$modMarker] = null;
 
-            $this->listDescr[$key] = new CacheDescr(
+            $this->checkAndBuildCaches(
                 $name,
-                $url,
-                CacheDescr::TYPE_PAGE,
-                $this->lang,
+                EntityCacheIndex::TYPE_PAGE,
                 $key,
                 $modMarker,
-                $this->processedAt
+                $urlStr,
+                $rawText
             );
-        }
+		}
 
-        protected function getXPathAndRedirectedURL(string &$pUrl): ?\DOMXPath {
-            if (in_array($pUrl, $this->checked) || in_array($pUrl, $this->excluded)) {
-                return null;
-            }
-
-            $this->checked[] = $pUrl;
-
-            $baseUrl = $pUrl;
-            $xpath = PageHelper::getXPath($this->ch, $this->domain, $pUrl);
-
-            if ($baseUrl != $pUrl) {
-                if (in_array($pUrl, $this->checked) || in_array($pUrl, $this->excluded)) {
-                    return null;
-                }
-
-                $this->checked[] = $pUrl;
-            }
-
-            return $xpath;
-        }
-
-        protected function processPageLinks(\DOMXPath $xpath) {
-            $links = $xpath->evaluate('//a/@href');
-
-            foreach ($links as $link) {
-                $newUrl = PageHelper::domainRelativeURL($link->value);
-                if (!$newUrl) {
-                    continue;
-                }
-
-                if (!str_starts_with($newUrl, '/')) {
-                    $newUrl = '/' . $newUrl;
-                }
-
-                $this->cachePageRec($newUrl);
-            }
-        }
-
-        protected function cacheFilesInDir(string $dir) {
-            if (in_array($dir, $this->excluded) || in_array($dir, $this->checked)) {
+        /**
+         * This function recursively scans the given directory and caches the valid files
+         * @param string $dir Directory to be scanned
+         * @return void
+         */
+		protected function cacheFilesInDir(string $dir): void {
+            if (!$this->shouldScan($dir)) {
                 return;
             }
 
-            $files = FilesystemHelper::listFiles($dir);
-            $this->checked[] = $dir;
-
-            foreach ($files as $filename) {
+			$files = FilesystemHelper::listFiles($dir);
+			foreach ($files as $filename) {
                 $path = $dir . '/' . $filename;
 
                 if (is_dir($path)) {
@@ -254,84 +275,137 @@
                 }
 
                 $extension = pathinfo($path, PATHINFO_EXTENSION);
-                if (!in_array($extension, self::EXTS)) {
+                if (!array_key_exists($extension, self::EXTENSIONS)) {
                     continue;
                 }
-
-                error_log("processing file: " . $path);
 
                 $modMarker = filemtime($path);
                 $key = md5($path);
 
-                $listed = array_key_exists($key, $this->listDescr);
-                if ($listed && $this->listDescr[$key]->modMarker == $modMarker) {
-                    $this->listDescr[$key]->processedAt = $this->processedAt;
-                    $this->unchangedCtr++;
-
-                    continue;
-                }
-
-                $url = mb_substr($path, $this->prefixLength);
+                $url = mb_substr($path, $this->rootPathLength);
 
                 $rawText = $this->textExtractHelper->getText($path, $extension);
                 if (!$rawText) {
                     continue;
                 }
 
-                $this->buildCaches($key, $rawText);
-
-                $this->listDescr[$key] = new CacheDescr(
+                $this->checkAndBuildCaches(
                     $filename,
-                    $url,
-                    CacheDescr::TYPE_FILE,
-                    LangHelper::assumeFileLanguage($url),
+                    EntityCacheIndex::TYPE_FILE,
                     $key,
                     $modMarker,
-                    $this->processedAt
+                    $url,
+                    $rawText
                 );
             }
-        }
+		}
 
-        protected function buildCaches(string $key, string $rawText) {
-            /** @var WordDescr[] $wordDescrs */
-            $wordDescrs = TokenHelper::wordDescrs($rawText, $this->ignoredWords);
-
-            $exactPos = 0;
-            $tokenizedCtr = 0;
-
-            /** @var string[] $tokenizedWords */
-            $tokenizedWords = [];
-
-            /** @var string[] $exactWords */
-            $exactWords = [];
-
-            /** @var WordOffsets[] $offsets */
-            $offsets = [];
-
-            foreach ($wordDescrs as $wordDescr) {
-                $word = $wordDescr->word;
-                $wordLength = strlen($word);
-                $start = $wordDescr->offset;
-                $end = $wordDescr->offset + $wordLength;
-
-                $tokenizedPos = null;
-                if (!$wordDescr->isIgnored) {
-                    $tokenizedWords[] = $word;
-                    $tokenizedPos = $tokenizedCtr++;
-                }
-
-                $offsets[] = new WordOffsets($start, $end, $word, $exactPos, $tokenizedPos);
-
-                $exactWords[] = $word;
-                $exactPos += $wordLength + 1;
+        /**
+         * @param string $entity Directory path or page URL, or another unique identifier
+         * @return bool Whether the entity has already been processed or scanned
+         */
+        protected function shouldScan(string $entity): bool {
+            $excluded = array_key_exists($entity, $this->excluded);
+            $checked = array_key_exists($entity, $this->checked);
+            if ($excluded || $checked) {
+                return false;
             }
 
-            $this->cacheStorage->putOffsets($key, $offsets);
-            $this->cacheStorage->putTokenized($key, $tokenizedWords);
-            $this->cacheStorage->putExact($key, implode(' ', $exactWords));
-            $this->cacheStorage->putRaw($key, $rawText);
+            $this->checked[$entity] = null;
+
+            return true;
+        }
+
+        /**
+         * This function checks if the cache needs to be built and builds it
+         * @param string $name Entity name
+         * @param string $type Entity type
+         * @param string $key Cache key
+         * @param string $modMarker File mod time or page content hash
+         * @param string $url Entity URL
+         * @param string $rawText Entity raw contents
+         * @return void
+         */
+        protected function checkAndBuildCaches(
+            string $name,
+            string $type,
+            string $key,
+            string $modMarker,
+            string $url,
+            string $rawText
+        ): void {
+            if ($this->cacheIndex->exists($key)) {
+                $el =& $this->cacheIndex->get($key);
+
+                if ($el[EntityCacheIndex::MOD_MARKER] == $modMarker) {
+                    $el[EntityCacheIndex::PROCESSED_AT] = $this->processedAt;
+                    $this->unchangedCtr++;
+
+                    return;
+                }
+            }
+
+            $this->buildCaches($key, $rawText);
+
+            $this->cacheIndex->add(
+                $name,
+                $url,
+                $type,
+                LangHelper::assumeFileLanguage($url),
+                $key,
+                $modMarker,
+                $this->processedAt
+            );
+        }
+
+        /**
+         * This function saves the newly built file caches to the storage
+         * @param string $key Cache key
+         * @param string $rawText Raw entity contents
+         * @return void
+         */
+		protected function buildCaches(string $key, string $rawText): void {
+            $baseRes = TokenHelper::wordsWithOffsets($rawText);
+            if (!$baseRes) {
+                return;
+            }
+
+            $cache = new EntityCache();
+            $rawCache = new EntityRawCache();
+            $prevNonIgnoredWord = null;
+            $numBaseRes = count($baseRes);
+
+            $rawCache->setRawText($rawText);
+
+            for ($i = 0; $i < $numBaseRes; $i++) {
+                list ($word, $offset) = $baseRes[$i];
+                if (!$word) {
+                    continue;
+                }
+
+                $lcWord = mb_strtolower($word);
+
+                $isIgnored = array_key_exists($lcWord, $this->ignoredWords);
+                $isAcronym = array_key_exists($word, IgnoredWordsHelper::ACRONYMS);
+
+                $cache->add($lcWord, $i, $prevNonIgnoredWord);
+                $rawCache->add($i, $offset, $offset + strlen($lcWord));
+
+                if ($isIgnored && $isAcronym) {
+                    $cache->add(mb_strtoupper($word), $i, $prevNonIgnoredWord);
+                    $prevNonIgnoredWord = $i;
+
+                    continue;
+                }
+
+                if (!$isIgnored) {
+                    $prevNonIgnoredWord = $i;
+                }
+            }
+
+            $this->cacheStorage->putCache($key, $cache);
+            $this->cacheStorage->putRaw($key, $rawCache);
 
             $this->addedCtr++;
-        }
-    }
-?>
+		}
+	}

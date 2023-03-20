@@ -1,101 +1,115 @@
 <?php
-    namespace App\Core;
+	namespace App\Core;
+	
+	use Exception;
+    use PDO;
+	use PDOException;
+    use PDOStatement;
 
-    /**
-     * Wrapper for exceptions
-     */
-    class DBException extends \Exception{}
+    /** Wrapper for DB exceptions */
+	class DBException extends Exception{}
 
-    /**
-     * Queries to MySQL database
-     */
-    class DB {
-        protected static ?self $db = null;
-
-        // The database connection
-        protected \PDO $dbconn;
+    /** PDO wrapper */
+	class DB {
+        /** @var ?self Class instance */
+		protected static ?self $db = null;
+		
+		/** @var PDO Database connection handle */
+		protected PDO $dbConn;
 
         /**
-         * Creates a PDO instance representing a connection to a database
-         * @param string    $pathToFile   path to json with DB-credentials
+         * @param string $pathToFile Path to json with DB credentials
+         * @return self DB instance
          */
-        public function __construct($pathToFile) {
-            if (self::$db !== null) {
-                return self::$db;
+        public static function instance(string $pathToFile): static {
+            if (self::$db === null) {
+                self::$db = new self($pathToFile);
             }
 
-            $json = json_decode(file_get_contents($pathToFile), true);
-            if (!$json) {
-                echo '<h1>Cannot parse DB credentials file!</h1>';
-                die();
+            return self::$db;
+        }
+
+		protected function __construct(string $pathToFile) {
+			$json = json_decode(file_get_contents($pathToFile), true);
+			if (!$json) {
+				echo '<h1>Cannot parse DB credentials file!</h1>';
+				die();
+			}
+			
+			try {
+				$this->dbConn = new PDO($json['type'] . ':dbname=' . $json['name'] .  ';host=' .
+                    $json['host'] .  ';port=' . $json['port'], $json['user'], $json['pass']);
+			} catch (PDOException) {
+				echo '<h1>Cannot connect to the database!</h1>';
+				die();
+			}
+			
+			$this->dbConn->setAttribute(PDO::ATTR_ERRMODE, PDO::ERRMODE_EXCEPTION);
+			$this->dbConn->setAttribute(PDO::ATTR_EMULATE_PREPARES, false);
+		}
+
+        /**
+         * @param string $query Valid MySQL statement
+         * @param ?array $dba Statement params (key => value)
+         * @return ?PDOStatement Sanitized $query
+         * @throws DBException
+         */
+		private function prepare(string $query, array $dba = null): ?PDOStatement {
+			try {
+				if ($dba) {
+					$stmt = $this->dbConn->prepare($query);
+					$stmt->execute($dba);
+				} else {
+					$stmt = $this->dbConn->query($query);
+				}
+			} catch (PDOException $e) {
+				throw new DBException($e->getMessage());
+			}
+			
+			return $stmt ?: null;
+		}
+
+        /**
+         * @param string $query Valid MySQL statement
+         * @param ?array $dba Statement params (key => value)
+         * @return ?array Array of arrays of results (column => value)
+         * @throws DBException
+         */
+		public function select(string $query, array $dba = null): ?array {
+			$res = $this->prepare($query, $dba)->fetchAll(PDO::FETCH_ASSOC);
+
+            return $res ?: null;
+		}
+
+        /**
+         * @param string $query Valid MySQL statement
+         * @param ?array $dba Statement params (key => value)
+         * @return ?array Array of results (column => value)
+         * @throws DBException
+         */
+		public function fetch(string $query, array $dba = null): ?array {
+			$res = $this->prepare($query, $dba)->fetch(PDO::FETCH_ASSOC);
+            if (!$res) {
+                return null;
             }
 
-            try {
-                $this->dbconn = new \PDO('mysql:dbname=' . $json['db'] .  ';host=' . $json['host'] . ';port=' . $json['port'], $json['user'], $json['pass']);
-            } catch (\PDOException $e) {
-                echo '<h1>Cannot connect to the database!</h1>';
-                die();
+            return $res;
+		}
+
+        /**
+         * @param string $query Valid MySQL statement
+         * @param ?array $dba Statement params (key => value)
+         * @return ?string Last inserted ID (for select statements)
+         * @throws DBException
+         */
+		public function query(string $query, array $dba = null): ?string {
+			$res = $this->prepare($query, $dba);
+            if (!$res) {
+                return null;
             }
+			
+			$res = $this->dbConn->lastInsertID();
 
-            $this->dbconn->setAttribute(\PDO::ATTR_ERRMODE, \PDO::ERRMODE_EXCEPTION);
-            $this->dbconn->setAttribute(\PDO::ATTR_EMULATE_PREPARES, false);
-
-            self::$db = $this;
-        }
-
-        /**
-         * @param string    $query  Valid MySQL statement
-         * @param array    $dba    [optional] This array holds one or more key=>value pairs to set
-         * attribute values for the $query
-         * @return string   sanitized $query
-         */
-        private function prepare($query, $dba) {
-            try {
-                if ($dba) {
-                    $stmt = $this->dbconn->prepare($query);
-                    $stmt->execute($dba);
-                } else {
-                    $stmt = $this->dbconn->query($query);
-                }
-            } catch (PDOException $e) {
-                throw new DBException($e->getMessage());
-            }
-
-            return $stmt;
-        }
-
-        /**
-         * @param string    $query  Valid MySQL statement
-         * @param array    $dba    [optional] This array holds one or more key=>value pairs to set
-         * attribute values for the $query
-         * @return array|false    An array containing all of the remaining rows in the result set.
-         * An empty array is returned if there are zero results to fetch, or false on failure.
-         */
-        public function select($query, $dba = null) {
-            return $this->prepare($query, $dba)->fetchAll(\PDO::FETCH_ASSOC);
-        }
-
-        /**
-         * @param string    $query  Valid MySQL statement
-         * @param array $dba    [optional] This array holds one or more key=>value pairs to set
-         * attribute values for the $query
-         * @return mixed|false  Selected database row
-         */
-        public function fetch($query, $dba = null) {
-            return $this->prepare($query, $dba)->fetch(\PDO::FETCH_ASSOC);
-        }
-
-        /**
-         * @param string    $query  Valid MySQL statement
-         * @param array $dba    [optional] This array holds one or more key=>value pairs to set
-         * attribute values for the $query
-         * @return string|false  The row ID of the last row that was inserted into
-         * the database.
-         */
-        public function query($query, $dba = null) {
-            $this->prepare($query, $dba);
-
-            return $this->dbconn->lastInsertID();
-        }
-    }
-?>
+            return $res ?: null;
+		}
+	}

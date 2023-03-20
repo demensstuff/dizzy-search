@@ -1,35 +1,36 @@
 <?php
-    namespace App\Services\Search;
+	namespace App\Services\Search;
+	
+	use App\Entities\Cache\EntityCacheIndex;
+	use App\Entities\Cache\EntityCache;
+	use App\Entities\Search\SearchCache;
+	use App\Entities\Search\SearchQuery;
+	use App\Storage\Cache\FileCacheStorage;
+	use App\Storage\Cache\ICacheStorage;
+	use App\Storage\Search\FileQueryCacheStorage;
+	use App\Storage\Search\IQueryCacheStorage;
 
-    use App\Entities\Cache\CacheDescr;
-    use App\Entities\Cache\WordOffsets;
-    use App\Entities\Search\SearchCache;
-    use App\Entities\Search\SearchQuery;
-    use App\Entities\Search\SearchResult;
-    use App\Helpers\LangHelper;
-    use App\Storage\Cache\FileCacheStorage;
-    use App\Storage\Cache\ICacheStorage;
-    use App\Storage\Search\FileQueryCacheStorage;
-    use App\Storage\Search\IQueryCacheStorage;
-
+    /** This class contains all the methods related to search cache */
     class SearchService {
-        /** Lifetime of a cached search query */
-        const QUERY_CACHE_LIFETIME = 86400;
+        /** @var int Lifetime of a cached search query */
+        protected const QUERY_CACHE_LIFETIME = 86400;
 
-        /** Maximum search results */
-        const MAX_RESULTS = 50;
+        /** @var int Maximum search results */
+        protected const MAX_RESULTS = 50;
 
-        /** Number of words before and after match in preview */
-        const NUM_SEL_WORDS = 16;
+        /** @var int Number of words before and after match in preview */
+        protected const NUM_SEL_WORDS = 16;
 
-        /** HTML tag which leads the match */
-        const OPEN_HTML = '<span class="search-keyword">';
+        /** @var string HTML tag which leads the match */
+        protected const OPEN_HTML = '<span class="search-keyword">';
 
-        /** HTML tag which trails the match */
-        const CLOSE_HTML = '</span>';
+        /** @var string HTML tag which trails the match */
+        protected const CLOSE_HTML = '</span>';
 
+        /** @var ICacheStorage Entity cache storage */
         protected ICacheStorage $cacheStorage;
 
+        /** @var IQueryCacheStorage Search query cache storage */
         protected IQueryCacheStorage $queryCacheStorage;
 
         public function __construct() {
@@ -38,315 +39,229 @@
         }
 
         /**
-         * @param SearchQuery $query
-         * @return SearchResult[]
+         * This function performs search by the built search query
+         * @param SearchQuery $query Search query object
+         * @return SearchCache
          */
-        public function search(SearchQuery $query) {
-            /** @var SearchResult[] $results */
-            $results = $this->cachedSearchResults($query->str);
+        public function search(SearchQuery $query): SearchCache {
+            $queryStr = $query->str();
+            $searchCache = $this->queryCacheStorage->get($queryStr);
 
-            if ($results !== null) {
-                return $results;
+            if ($searchCache->numResults() > 0) {
+                if ($searchCache->time() >= time() - self::QUERY_CACHE_LIFETIME) {
+                    return $searchCache;
+                }
+
+                $this->queryCacheStorage->delete($queryStr);
             }
 
-            /** @var array $listDescr 'string' => 'CacheDescr' */
-            $listDescr = $this->cacheStorage->list();
-            if (!$listDescr) {
-                return [];
+            $searchCache->reset($queryStr);
+            $cacheIndex = $this->cacheStorage->list();
+
+            if ($cacheIndex->empty()) {
+                return new SearchCache();
             }
 
-            $results = array_filter(array_map(function ($descr) use ($query) {
-                $offsets = $this->cacheStorage->offsets($descr->key);
-                if (!$offsets) {
+            $words = $query->words();
+            $exWords = $query->wordsExact();
+            $noExact = $query->noExact();
+            $cacheIndexArr = $cacheIndex->toArray();
+
+            $minMatch = max(intdiv($query->numWords(), 2), 1);
+
+            foreach ($cacheIndexArr as $cacheEntry) {
+                $cache = $this->cacheStorage->cache($cacheEntry[EntityCacheIndex::KEY]);
+                if ($cache->empty()) {
+                    continue;
+                }
+
+                $num = 0;
+                $isExact = true;
+                $len = 0;
+                $st = 0;
+                $end = 0;
+
+                if (!$noExact) {
+                    list ($num, $len, $st, $end) = $this->searchExact($cache, $exWords);
+                }
+
+                if (!$num) {
+                    list ($num, $len, $st, $end) = $this->searchNonExact($cache, $words);
+
+                    $isExact = false;
+                }
+
+                if ($len >= $minMatch) {
+                    $searchCache->add(
+                        $cacheEntry[EntityCacheIndex::NAME],
+                        $cacheEntry[EntityCacheIndex::URL],
+                        $cacheEntry[EntityCacheIndex::TYPE],
+                        $cacheEntry[EntityCacheIndex::LANG],
+                        $cacheEntry[EntityCacheIndex::KEY],
+                        $num,
+                        $isExact,
+                        $len,
+                        $st,
+                        $end
+                    );
+                }
+            }
+
+            $searchCache->sort();
+            $searchCache->slice(self::MAX_RESULTS);
+            $this->setSubstr($searchCache);
+
+            $this->queryCacheStorage->put($queryStr, $searchCache);
+
+            return $searchCache;
+        }
+
+        /**
+         * Performs a strict search in the given cache
+         * @param EntityCache $cache Cache to be scanned
+         * @param array $words Words to be searches
+         * @return ?array
+         *     number of results (int),
+         *     max result length,
+         *     first match start position,
+         *     last match end position
+         */
+        public function searchExact(EntityCache $cache, array $words): ?array {
+            $positions = [];
+
+            foreach ($words as $word) {
+                $curSet = $cache->get($word);
+                if (!$curSet) {
                     return null;
                 }
 
-                $numOffsets = count($offsets);
+                $positions[] = $curSet;
+            }
 
-                /** @var SearchResult $result */
-                if (!$query->noExact) {
-                    $result = $this->searchExact($query, $descr, $offsets, $numOffsets);
-                    if ($result) {
-                        return $result;
+            $firstStart = 0;
+            $firstEnd = 0;
+            $numRes = 0;
+
+            $first = $positions[0];
+            unset($positions[0]);
+
+            foreach ($first as $end => $null) {
+                $start = $end;
+
+                foreach ($positions as $pos) {
+                    if (!array_key_exists(++$end, $pos)) {
+                        continue 2;
                     }
                 }
 
-                return $this->searchTokenized($query, $descr, $offsets, $numOffsets);
-            }, $listDescr));
+                if ($numRes == 0) {
+                    $firstStart = $start;
+                    $firstEnd = $end;
+                }
 
-            self::sortResults($results);
-            $results = array_slice($results, 0, self::MAX_RESULTS);
+                $numRes++;
+            }
 
-            $this->queryCacheStorage->put($query->str, $results);
-
-            return $results;
+            return [ $numRes, $firstEnd - $firstStart + 1, $firstStart, $firstEnd ];
         }
 
         /**
-         * @param SearchResult[] &$pResults
-         * @param string|null $lang
+         * Performs a non-strict search in the given cache
+         * @param EntityCache $cache Cache to be scanned
+         * @param array $words Words to be searches
+         * @return ?array
+         *     number of results (int),
+         *     max result length,
+         *     first match start position,
+         *     last match end position
          */
-        public static function sortResults(&$pResults, string $lang = null) {
-            usort($pResults, function ($a, $b) use ($lang) {
-                if ($a->isExact != $b->isExact) {
-                    return $b->isExact <=> $a->isExact;
+        public function searchNonExact(EntityCache $cache, array $words): ?array {
+            $positions = [];
+            foreach ($words as $word) {
+                $positions += ($cache->get($word) ?? []);
+            }
+
+            if (!$positions) {
+                return null;
+            }
+
+            krsort($positions);
+
+            $bestLen = 0;
+            $bestStart = 0;
+            $bestEnd = 0;
+            $numRes = 0;
+
+            foreach ($positions as $end => $beforeStart) {
+                $start = $end;
+                $len = 1;
+
+                unset($positions[$end]);
+
+                while (array_key_exists($beforeStart, $positions)) {
+                    $start = $beforeStart;
+                    $beforeStart = $positions[$beforeStart];
+                    $len++;
+
+                    unset($positions[$start]);
                 }
 
-                if ($lang) {
-                    $aHasRightLang = $a->lang == $lang || $a->lang == LangHelper::NONE;
-                    $bHasRightLang = $b->lang == $lang || $b->lang == LangHelper::NONE;
+                if ($len > $bestLen) {
+                    $bestLen = $len;
+                    $bestStart = $start;
+                    $bestEnd = $end;
+                    $numRes = 1;
+                } else if ($len == $bestLen) {
+                    $numRes++;
+                    $bestStart = $start;
+                    $bestEnd = $end;
+                }
+            }
 
-                    if ($aHasRightLang != $bHasRightLang) {
-                        if ($bHasRightLang) {
-                            return 1;
-                        }
+            return [ $numRes, $bestLen, $bestStart, $bestEnd ];
+        }
 
-                        return -1;
-                    }
+        /**
+         * Generates preview string for all elements of the search cache
+         * @param SearchCache $searchCache Search cache to be processed
+         * @return void
+         */
+        public function setSubstr(SearchCache $searchCache): void {
+            $searchCache->each(function (array &$el) {
+                $rawCache = $this->cacheStorage->raw($el[SearchCache::KEY]);
+                $numWords = $rawCache->num();
+
+                if ($numWords == 0) {
+                    return;
                 }
 
-                if ($a->type != $b->type) {
-                    if ($b->type == CacheDescr::TYPE_PAGE) {
-                        return 1;
-                    }
+                $prefix = '';
+                $postfix = '';
 
-                    return -1;
+                $startIndex = $el[SearchCache::MATCH_START] - self::NUM_SEL_WORDS;
+                if ($startIndex < 0) {
+                    $startIndex = 0;
+                } else {
+                    $prefix = '... ';
                 }
 
-                if ($a->longestMatch != $b->longestMatch) {
-                    return $b->longestMatch <=> $a->longestMatch;
+                $endIndex = $el[SearchCache::MATCH_END] + self::NUM_SEL_WORDS;
+                if ($endIndex >= $numWords) {
+                    $endIndex = $numWords - 1;
+                } else {
+                    $postfix = ' ...';
                 }
 
-                return $b->numMatches <=> $a->numMatches;
+                $start = $rawCache->getStart($startIndex);
+                $end = $rawCache->getEnd($endIndex);
+                $startMatch = $rawCache->getStart($el[SearchCache::MATCH_START]);
+                $endMatch = $rawCache->getEnd($el[SearchCache::MATCH_END]);
+
+                $res = substr($rawCache->getRawText(), $start, $end - $start);
+			    $res = substr_replace($res, self::CLOSE_HTML, $endMatch - $start, 0);
+			    $res = substr_replace($res, self::OPEN_HTML, $startMatch - $start, 0);
+
+                $el[SearchCache::SUBSTR] = $prefix . $res . $postfix;
             });
         }
-
-        /**
-         * @param SearchQuery $query
-         * @param CacheDescr $descr
-         * @param WordOffsets[] $offsets
-         * @param int $numOffsets
-         * @return SearchResult|null
-         */
-        protected function searchExact(
-            SearchQuery $query,
-            CacheDescr $descr,
-            $offsets,
-            int $numOffsets
-        ): ?SearchResult {
-            /** @var string|null $exact */
-            $exact = $this->cacheStorage->exact($descr->key);
-
-            if ($exact === null) {
-                return null;
-            }
-
-            $pos = strpos($exact, $query->str);
-            if ($pos === false) {
-                return null;
-            }
-
-            $startMatchIndex = array_search($pos, array_column($offsets, 'exactPos'));
-            if ($startMatchIndex === null) {
-                return null;
-            }
-
-            $endMatchIndex = $startMatchIndex + $query->numWordsStr - 1;
-            if ($endMatchIndex >= $numOffsets) {
-                $endMatchIndex = $numOffsets - 1;
-            }
-
-            $numMatches = 1;
-            while (($pos = strpos($exact, $query->str, $pos + 1)) !== false) {
-                $numMatches++;
-            }
-
-            return $this->buildResult(
-                $descr,
-                $offsets,
-                $numOffsets,
-                $startMatchIndex,
-                $endMatchIndex,
-                $numMatches
-            );
-        }
-
-        /**
-         * @param SearchQuery $query
-         * @param CacheDescr $descr
-         * @param WordOffsets[] $offsets
-         * @param int $numOffsets
-         * @return SearchResult|null
-         */
-        protected function searchTokenized(
-            SearchQuery $query,
-            CacheDescr $descr,
-            $offsets,
-            int $numOffsets
-        ): ?SearchResult {
-            $tokenized = $this->cacheStorage->tokenized($descr->key);
-            if ($tokenized === null) {
-                return null;
-            }
-
-            list ($numMatches, $longestMatch, $startPos, $endPos) = self::tokenizedResults(
-                $tokenized,
-                $query
-            );
-
-            if ($numMatches === null) {
-                return null;
-            }
-
-            $startMatchIndex = array_search($startPos, array_column(
-                $offsets,
-                'tokenizedPos'
-            ));
-
-            $endMatchIndex = array_search($endPos, array_column($offsets, 'tokenizedPos'));
-
-            if ($startMatchIndex === null || $endMatchIndex === null) {
-                return null;
-            }
-
-            return $this->buildResult(
-                $descr,
-                $offsets,
-                $numOffsets,
-                $startMatchIndex,
-                $endMatchIndex,
-                $numMatches,
-                false,
-                $longestMatch
-            );
-        }
-
-        /**
-         * @param CacheDescr $descr
-         * @param WordOffsets[] $offsets
-         * @param int $numOffsets
-         * @param int $startMatchIndex
-         * @param int $endMatchIndex
-         * @param int $numMatches
-         * @param bool $isExact
-         * @param int $longestMatch
-         * @return SearchResult
-         */
-        protected function buildResult(
-            CacheDescr $descr,
-            $offsets,
-            int $numOffsets,
-            int $startMatchIndex,
-            int $endMatchIndex,
-            int $numMatches,
-            bool $isExact = true,
-            int $longestMatch = 0
-        ): SearchResult {
-            $prefix = '';
-            $postfix = '';
-
-            $startIndex = $startMatchIndex - self::NUM_SEL_WORDS;
-            if ($startIndex < 0) {
-                $startIndex = 0;
-            } else {
-                $prefix = '... ';
-            }
-
-            $endIndex = $endMatchIndex + self::NUM_SEL_WORDS;
-            if ($endIndex >= $numOffsets) {
-                $endIndex = $numOffsets - 1;
-            } else {
-                $postfix = ' ...';
-            }
-
-            $raw = $this->cacheStorage->raw($descr->key);
-
-            $start = $offsets[$startIndex]->start;
-            $end = $offsets[$endIndex]->end;
-            $startMatch = $offsets[$startMatchIndex]->start;
-            $endMatch = $offsets[$endMatchIndex]->end;
-
-            $substr = substr($raw, $start, $end - $start);
-            $substr = substr_replace($substr, self::CLOSE_HTML, $endMatch - $start, 0);
-            $substr = substr_replace($substr, self::OPEN_HTML, $startMatch - $start, 0);
-
-            return new SearchResult(
-                $descr->name,
-                $descr->url,
-                $descr->type,
-                $descr->lang,
-                $descr->key,
-                $numMatches,
-                $isExact,
-                $longestMatch,
-                $prefix . $substr . $postfix
-            );
-        }
-
-        /**
-         * @param string $str
-         * @return SearchResult[]|null
-         */
-        protected function cachedSearchResults(string $str) {
-            /** @var SearchCache $cachedQuery */
-            $cachedQuery = $this->queryCacheStorage->get($str);
-            if ($cachedQuery === null) {
-                return null;
-            }
-
-            $cacheValidAfter = time() - self::QUERY_CACHE_LIFETIME;
-
-            if ($cachedQuery && $cachedQuery->time >= $cacheValidAfter) {
-                return $cachedQuery->results;
-            }
-
-            $this->queryCacheStorage->remove($str);
-
-            return null;
-        }
-
-        /**
-         * @param string[] $c
-         * @param SearchQuery $q
-         * @return int[]
-         */
-        protected static function tokenizedResults($tokenized, SearchQuery $query) {
-            $numMatches = null;
-            $longestMatch = intdiv($query->numWords, 2) - 1;
-            $startPos = 0;
-            $endPos = 0;
-
-            $numTokenized = count($tokenized);
-            $startSel = null;
-
-            for ($i = 0; $i <= $numTokenized; $i++) {
-                if ($i < $numTokenized && in_array($tokenized[$i], $query->words)) {
-                    if ($startSel === null) {
-                        $startSel = $i;
-                    }
-
-                    continue;
-                }
-
-                if ($startSel === null) {
-                    continue;
-                }
-
-                $lenSel = $i - $startSel;
-
-                if ($lenSel > $longestMatch) {
-                    $longestMatch = $lenSel;
-                    $startPos = $startSel;
-                    $endPos = $i - 1;
-                    $numMatches = 1;
-                } else if ($lenSel == $longestMatch && $numMatches !== null) {
-                    $numMatches++;
-                }
-
-                $startSel = null;
-            }
-
-            return [ $numMatches, $longestMatch, $startPos, $endPos ];
-        }
     }
-?>

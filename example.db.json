@@ -1,0 +1,8 @@
+{
+	"conn": "mysql",
+	"name": "dizzy",
+	"host": "localhost",
+	"port": 3306,
+	"user": "dev",
+	"pass": "dev"
+}

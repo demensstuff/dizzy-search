@@ -1,35 +1,16 @@
 <?php
-    namespace App\Storage\Cache;
+	namespace App\Storage\Cache;
+	
+	interface ICacheInfoStorage {
+		public function includedDirs(): array;
 
-    interface ICacheInfoStorage {
-        /**
-         * @return string[]
-         */
-        public function includedDirs();
+		public function excludedDirs(): array;
 
-        /**
-         * @return string[]
-         */
-        public function excludedDirs();
+		public function excludedPages(): array;
 
-        /**
-         * @return string[]
-         */
-        public function excludedPages();
+		public function putIncludedDirs($includedDirs): void;
 
-        /**
-         * @param string[] $includedDirs
-         */
-        public function putIncludedDirs($includedDirs);
+		public function putExcludedDirs($excludedDirs): void;
 
-        /**
-         * @param string[] $excludedDirs
-         */
-        public function putExcludedDirs($excludedDirs);
-
-        /**
-         * @param string[] $excludedPages
-         */
-        public function putExcludedPages($excludedPages);
-    }
-?>
+		public function putExcludedPages($excludedPages): void;
+	}

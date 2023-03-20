@@ -1,62 +1,70 @@
 <?php
-    namespace App\Helpers;
+	namespace App\Helpers;
 
-    class LangHelper {
-        /** No specified language */
-        const NONE = 'none';
+    /** This class provides a set of methods related to the site languages */
+	class LangHelper {
+		/** @var string No specified language */
+		public const NONE = 'none';
+		
+		/** @var string English */
+		public const EN = 'en';
+		
+		/** @var string Russian */
+		public const RU = 'ru';
 
-        /** English */
-        const EN = 'en';
+        /** @var string[] All available languages */
+        public const LANGUAGES = [ self::EN, self::RU ];
+		
+		/** @var array[string]null Filepath tokens which may mark the language */
+		protected const MARKERS = [
+            self::EN => [
+                'en'       => null,
+                'eng'      => null,
+                'english'  => null,
+            ],
+            self::RU => [
+                'ru'      => null,
+                'rus'     => null,
+                'russian' => null,
+            ]
+		];
 
-        /** Russian */
-        const RU = 'ru';
+        /**
+         * @return string Current language
+         */
+		public static function lang(): string {
+			@session_start();
+			
+			return $_SESSION['language'] ?? self::NONE;
+		}
 
-        /** If these words are present in a filepath, assume that the language is English */
-        const EN_MARKERS = [ 'en', 'eng', 'english' ];
-
-        /* If these words are present in a filepath, assume that the language is Russian */
-        const RU_MARKERS = [ 'ru', 'rus', 'russian' ];
-
-        public static function lang(): string {
-            @session_start();
-
-            return $_SESSION['language'] ?? self::NONE;
-        }
-
-        public static function assumeFileLanguage(string $url): string {
-            /** @var string[] $tokens */
-            $tokens = TokenHelper::explode($url);
-
-            $en = false;
-            $ru = false;
+        /**
+         * This function tries to assume the language of the file based on the keywords
+         * in its URL
+         * @param string $url File URL (relative to the document root)
+         * @return string Assumed language of the file
+         */
+		public static function assumeFileLanguage(string $url): string {
+			$tokens = TokenHelper::explode($url);
+			
+			$assumedLang = self::NONE;
 
             foreach ($tokens as $token) {
-                if (!$en && in_array($token, self::EN_MARKERS)) {
-                    $en = true;
-
-                    if ($ru) {
-                        break;
+                foreach (self::MARKERS as $lang => $markers) {
+                    if (!array_key_exists($token, $markers)) {
+                        continue;
                     }
-                }
 
-                if (!$ru && in_array($token, self::RU_MARKERS)) {
-                    $ru = true;
-
-                    if ($en) {
-                        break;
+                    if ($assumedLang != self::NONE) {
+                        return self::NONE;
                     }
+
+                    $assumedLang = $lang;
+
+                    break;
                 }
             }
-
-            if ($en == $ru) {
-                return self::NONE;
-            }
-
-            if ($en) {
-                return self::EN;
-            }
-
-            return self::RU;
-        }
-    }
-?>
+			
+			return $assumedLang;
+		}
+	}
